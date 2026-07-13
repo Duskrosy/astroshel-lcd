@@ -1,0 +1,37 @@
+# SDD controller scratch (progress ledger, briefs, reports)
+.superpowers/
+
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# openh264 downloaded binary (fetched at build/runtime)
+/openh264*.dll
+/openh264*.so
+
+# App runtime config / local state
+config.local.toml
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Scratch / captures (large binary reverse-engineering artifacts)
+*.pcap
+*.h264
+raw_out.bin
+out_hex.txt
+
+# stray build logs
+*.log
+
+# AI/process planning artifacts (not part of the app)
+docs/superpowers/
+docs/design.md
+
+# release artifacts
+/dist/

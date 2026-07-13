@@ -1,0 +1,28 @@
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+  "-C", "link-arg=-static",
+  "-C", "link-arg=-static-libgcc",
+  "-C", "link-arg=-static-libstdc++",
+  "-C", "link-arg=-Wl,-Bstatic",
+  "-C", "link-arg=-Wl,--start-group",
+  "-C", "link-arg=-l:libstdc++.a",
+  "-C", "link-arg=-lmingwex",
+  "-C", "link-arg=-lgcc",
+  "-C", "link-arg=-lgcc_eh",
+  "-C", "link-arg=-lmsvcrt",
+  "-C", "link-arg=-lwinpthread",
+  "-C", "link-arg=-Wl,--end-group",
+  "-C", "link-arg=-Wl,-Bdynamic",
+  "-C", "link-arg=-lkernel32",
+]
+
+# openh264-sys2's build script compiles C++ via the `cc` crate, which by
+# default emits a *dynamic* `cargo:rustc-link-lib=stdc++` directive. That
+# directive is independent of the `-static-libstdc++` flag above (which is a
+# GCC-frontend option with no effect when nothing implicitly requests C++
+# linking at the frontend level) and re-introduces a dynamic dependency on
+# libstdc++-6.dll regardless of the static archive we force-link above.
+# Setting CXXSTDLIB="" makes `cc` skip emitting that directive entirely, so
+# the only libstdc++ linkage is the single static one specified above.
+[env]
+CXXSTDLIB = ""

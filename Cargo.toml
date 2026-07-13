@@ -1,0 +1,32 @@
+[package]
+name = "astroshel-lcd"
+version = "0.1.0"
+edition = "2021"
+description = "Lean native display driver for the Jungle Leopard Astroshel AIO LCD"
+
+[dependencies]
+anyhow = "1"
+serialport = "4.5"
+openh264 = "0.9"          # source feature (default) compiles via MinGW g++
+tiny-skia = "0.12"
+fontdue = "0.9"
+nvml-wrapper = "0.10"
+sysinfo = "0.32"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+chrono = "0.4"
+tray-icon = "0.19"      # talks to Win32 directly (via muda); no event loop of its own
+image = "0.25"          # used in Phase 2; harmless to include now
+log = "0.4"
+simplelog = "0.12"
+eframe = "0.29"         # hosts the winit event loop the whole app (incl. tray) runs on
+egui = "0.29"           # must match eframe's egui version exactly
+rfd = "0.15"
+resvg = { version = "0.47.0", default-features = false }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
