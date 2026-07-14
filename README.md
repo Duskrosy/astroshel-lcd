@@ -62,6 +62,21 @@ The **Jungle Leopard Astroshel LCD 240 ARGB AIO** liquid cooler ships with a lit
 
 **Portable (no installer):** download the `.zip` instead, unzip anywhere, and run **`astroshel-lcd.exe`** (keep `ffmpeg.exe` next to it — it's only used to import video and otherwise never runs).
 
+## "Windows protected your PC" / antivirus warnings
+
+Astroshel Lean Display is a new, open-source app that isn't code-signed yet, so Windows may warn you the first time you run it. **This is about signing and download reputation — not because the app is harmful.** The full source is right here in this repo, and you can verify your download hasn't been tampered with (below).
+
+- **Blue "Windows protected your PC" (SmartScreen):** click **More info → Run anyway**.
+- **Red "threat found" (Windows Defender / other antivirus):** this is a false positive — small, unsigned Rust apps sometimes trip heuristic scanners. Allow/restore the file in your antivirus, and (optionally) report the false positive at **https://www.microsoft.com/wdsi/filesubmission** so it gets cleared for everyone.
+
+**Verify your download (recommended).** Every release includes a `SHA256SUMS.txt`. Check that your file matches:
+
+```
+certutil -hashfile astroshel-lean-display-v0.3.0-setup.exe SHA256
+```
+
+Compare the printed hash to the one in `SHA256SUMS.txt` on the [release page](https://github.com/Duskrosy/astroshel-lcd/releases/latest). If they match, the download is authentic.
+
 ## Usage
 
 - **Double-click the tray icon** (or right-click → Open) to open the window.
