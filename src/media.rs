@@ -22,7 +22,48 @@ impl Media {
     }
 }
 
+/// Safety guard against oversized source media: a huge GIF/image decoded at full
+/// source resolution can balloon RAM (a large GIF's frames alone reached ~370 MB) and
+/// raise per-frame compose/encode cost. Downscaling here (once, at decode time) caps
+/// that regardless of fit/zoom settings applied later. 640 keeps ample detail for a
+/// 320x320 LCD output while bounding worst-case memory/CPU.
+const MAX_SOURCE_SIDE: u32 = 640;
+
+/// Downscales `img` in place (preserving aspect ratio) so its longest side is at most
+/// `MAX_SOURCE_SIDE`, leaving smaller images untouched.
+fn downscale_if_needed(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    if w.max(h) <= MAX_SOURCE_SIDE {
+        return img;
+    }
+    let scale = MAX_SOURCE_SIDE as f32 / w.max(h) as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// Extensions handled by the one-shot video *importer* (`crate::video::import_to_cache`)
+/// rather than `load`'s image/GIF decoders. Video is no longer a live `Media` variant --
+/// it's imported once to a cached `.lcdv` (see `crate::cache`) and played back as
+/// pre-encoded packets, same as a GIF. Shared by callers (GUI/pipeline) that need to know
+/// whether a media path is a video *without* attempting to decode it as an image.
+const VIDEO_EXTS: [&str; 12] =
+    ["mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "ts", "mpg", "mpeg", "m2ts"];
+
+/// True if `path`'s extension is one routed to the video importer rather than `load`'s
+/// image/GIF decoders.
+pub fn is_video_path(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).map(|e| VIDEO_EXTS.iter().any(|v| e.eq_ignore_ascii_case(v))).unwrap_or(false)
+}
+
+/// Decodes an image or GIF file into a `Media`. Video files are no longer handled here --
+/// they're imported once via `crate::video::import_to_cache` into a cached `.lcdv` -- so a
+/// video-extension path bails immediately with a friendly, non-panicking error instead of
+/// being misread as a still image.
 pub fn load(path: &Path) -> Result<Media> {
+    if is_video_path(path) {
+        anyhow::bail!("video files are imported separately (Add Media > video import)");
+    }
     let is_gif = path
         .extension()
         .map(|e| e.eq_ignore_ascii_case("gif"))
@@ -37,7 +78,7 @@ pub fn load(path: &Path) -> Result<Media> {
             let delay = fr.delay().numer_denom_ms();
             let delay_ms = (delay.0 / delay.1.max(1)).max(20);
             out.push(MediaFrame {
-                img: fr.into_buffer(),
+                img: downscale_if_needed(fr.into_buffer()),
                 delay_ms,
             });
         }
@@ -47,7 +88,7 @@ pub fn load(path: &Path) -> Result<Media> {
         Ok(Media::Animated(out))
     } else {
         let img = image::open(path).with_context(|| "open image")?.to_rgba8();
-        Ok(Media::Static(img))
+        Ok(Media::Static(downscale_if_needed(img)))
     }
 }
 
@@ -218,5 +259,40 @@ mod decode_tests {
     #[test]
     fn missing_file_errors_no_panic() {
         assert!(load(std::path::Path::new("Z:/nope.png")).is_err());
+    }
+
+    #[test]
+    fn video_path_returns_friendly_error_no_panic() {
+        // `media::load` no longer decodes video at all (see `crate::video::import_to_cache`
+        // for the one-shot importer) -- a video-extension path must bail immediately with a
+        // friendly message and never panic, regardless of whether the bytes are actually a
+        // valid video (garbage bytes never even reach a decoder now).
+        let dir = std::env::temp_dir().join("astro_media_bogus_mp4");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path1 = dir.join("bogus_tiny.mp4");
+        std::fs::write(&path1, [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 0, 0]).unwrap();
+
+        let path2 = dir.join("bogus_random.mp4");
+        let mut buf = vec![0xFFu8; 512];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = ((i * 2654435761u32.wrapping_add(i as u32) as usize) % 256) as u8;
+        }
+        std::fs::write(&path2, &buf).unwrap();
+
+        for path in [&path1, &path2] {
+            let result = std::panic::catch_unwind(|| load(path));
+            match result {
+                Ok(Err(e)) => {
+                    let msg = format!("{e:#}");
+                    assert!(
+                        msg.contains("imported separately"),
+                        "expected friendly message, got: {msg}"
+                    );
+                }
+                Ok(Ok(_)) => panic!("video path should not decode as image/gif media: {path:?}"),
+                Err(_) => panic!("load() panicked on video-extension path {path:?}"),
+            }
+        }
     }
 }

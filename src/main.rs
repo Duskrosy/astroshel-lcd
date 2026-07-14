@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cache;
 mod command;
 mod config;
+mod dashboard;
 mod device;
+mod editor;
 mod encode;
 mod gui;
 mod icon;
@@ -11,6 +14,7 @@ mod pipeline;
 mod proto;
 mod render;
 mod sensors;
+mod video;
 mod winwnd;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,24 +76,44 @@ fn main() -> eframe::Result<()> {
         default_hook(info);
     }));
 
+    // Windows' default timer granularity is ~15.6ms, which makes the pipeline's short
+    // (down to 5ms) interruptible sleeps imprecise -- e.g. a nominal 5ms sleep can
+    // actually take up to ~15ms, which quantizes GIF frame pacing coarsely and
+    // reintroduces stutter. Raising the global timer resolution to 1ms for this
+    // process fixes that; it's a machine-wide setting while any process holds it, so
+    // we pair it with `timeEndPeriod(1)` on the way out (best-effort: the process may
+    // also exit via `process::exit`/panic, in which case Windows reclaims it anyway).
+    unsafe {
+        windows::Win32::Media::timeBeginPeriod(1);
+    }
+
     let cfg_path = config_path();
     let cfg = config::load(&cfg_path);
     set_logon(cfg.start_at_logon);
 
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel::<command::Command>();
+    // Shared "busy" flag: set by the pipeline worker while it's (re)loading/pre-encoding
+    // media (GIF pre-encode or a static image), so the GUI can show an "Applying..."
+    // indicator instead of appearing to hang.
+    let media_busy = Arc::new(AtomicBool::new(false));
 
     // Worker: the pipeline (owns COM3).
     let worker_cfg = cfg.clone();
     let stop_worker = stop.clone();
+    let worker_media_busy = media_busy.clone();
     let worker = std::thread::spawn(move || {
-        if let Err(e) = pipeline::run(worker_cfg, stop_worker, rx) {
+        if let Err(e) = pipeline::run(worker_cfg, stop_worker, rx, worker_media_busy) {
             log::error!("pipeline: {e:#}");
         }
     });
 
+    // Inner size tall enough to show the full 320x320 preview (heading + "Preview"
+    // label + margins on top of the 320px image) without the SidePanel/CentralPanel
+    // clipping the bottom rows (e.g. the CPU/GPU bars) -- see gui.rs `update`.
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([560.0, 340.0])
+        .with_inner_size([600.0, 460.0])
+        .with_min_inner_size([560.0, 440.0])
         .with_visible(false); // start hidden (tray-first)
     // Brand icon for the window/taskbar. Rendered at 256px for a crisp Alt-Tab /
     // taskbar thumbnail; falls back to eframe's default (no icon) if rasterizing
@@ -122,7 +146,7 @@ fn main() -> eframe::Result<()> {
                 // work even while eframe stops calling `update()` on a hidden window.
                 gui::spawn_tray_thread(cc.egui_ctx.clone(), tray_ids, stop_gui.clone());
             }
-            Ok(Box::new(gui::App::new(cfg, cfg_path, tx, tray, has_tray, stop_gui)))
+            Ok(Box::new(gui::App::new(cfg, cfg_path, tx, tray, has_tray, stop_gui, media_busy)))
         }),
     );
 
@@ -130,6 +154,14 @@ fn main() -> eframe::Result<()> {
     // even if `run_native` exits some other way than via the tray Quit path.
     stop.store(true, Ordering::Relaxed);
     let _ = worker.join();
+
+    // Best-effort: releases the 1ms timer resolution requested above. Safe to skip if
+    // the process is exiting via `process::exit`/panic -- Windows reclaims the
+    // resolution request when the process terminates regardless.
+    unsafe {
+        windows::Win32::Media::timeEndPeriod(1);
+    }
+
     res
 }
 

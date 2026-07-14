@@ -26,9 +26,18 @@ pub enum Command {
         fit: String,
         zoom: f32,
         pan: [f32; 2],
+        bitrate_kbps: u32,
     },
     /// Clear any loaded media, reverting `Mode::Media` to the solid placeholder.
     ClearMedia,
+    /// Load a cached, pre-encoded video (`.lcdv`, see `crate::cache`) built by
+    /// `crate::video::import_to_cache`. Playback is pure send-I/O -- the same
+    /// `frame_packets` path a pre-encoded GIF uses -- with no live ffmpeg
+    /// process involved. Errors (missing/corrupt file) are logged and ignored,
+    /// keeping whatever was previously displayed.
+    LoadCachedVideo { lcdv_path: String },
+    /// Replace the active dashboard (theme + widgets) used by the Dashboard render arm.
+    SetDashboard(crate::dashboard::Dashboard),
 }
 
 #[cfg(test)]

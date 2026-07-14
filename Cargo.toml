@@ -7,7 +7,7 @@ description = "Lean native display driver for the Jungle Leopard Astroshel AIO L
 [dependencies]
 anyhow = "1"
 serialport = "4.5"
-openh264 = "0.9"          # source feature (default) compiles via MinGW g++
+openh264 = "0.9"          # source feature (default) compiles via MinGW g++; encode path only
 tiny-skia = "0.12"
 fontdue = "0.9"
 nvml-wrapper = "0.10"
@@ -23,7 +23,7 @@ eframe = "0.29"         # hosts the winit event loop the whole app (incl. tray) 
 egui = "0.29"           # must match eframe's egui version exactly
 rfd = "0.15"
 resvg = { version = "0.47.0", default-features = false }
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Media"] }
 
 [profile.release]
 opt-level = "z"
