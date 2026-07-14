@@ -54,9 +54,13 @@ The **Jungle Leopard Astroshel LCD 240 ARGB AIO** liquid cooler ships with a lit
 
 ## Install
 
-1. Download the latest `astroshel-lean-display-*.zip` from the [**Releases**](https://github.com/Duskrosy/astroshel-lcd/releases/latest) page.
-2. **Close `Smart Screen V28`** first (both apps can't share the LCD's COM port). To stop it starting with Windows, remove it from Task Manager → Startup.
-3. Unzip anywhere and run **`astroshel-lcd.exe`**. It starts minimized to the tray. Keep `ffmpeg.exe` next to it — it's only used to import video and otherwise never runs.
+**Easiest — the installer:**
+
+1. Download **`astroshel-lean-display-*-setup.exe`** from the [**Releases**](https://github.com/Duskrosy/astroshel-lcd/releases/latest) page and run it. It's a simple Next → Finish wizard that needs **no admin rights**, adds a Start Menu shortcut, and starts with Windows. Uninstall any time from **Settings → Apps** (or the Start Menu "Uninstall" shortcut).
+2. **Close `Smart Screen V28`** first (both apps can't share the LCD's COM port). To stop it relaunching, remove it from Task Manager → Startup.
+3. Done — the app runs in the system tray. Double-click the tray icon to open it.
+
+**Portable (no installer):** download the `.zip` instead, unzip anywhere, and run **`astroshel-lcd.exe`** (keep `ffmpeg.exe` next to it — it's only used to import video and otherwise never runs).
 
 ## Usage
 
