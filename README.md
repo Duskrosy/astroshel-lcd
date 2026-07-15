@@ -54,13 +54,19 @@ The **Jungle Leopard Astroshel LCD 240 ARGB AIO** liquid cooler ships with a lit
 
 ## Install
 
-**Easiest — the installer:**
+**Recommended — winget:**
 
-1. Download **`astroshel-lean-display-*-setup.exe`** from the [**Releases**](https://github.com/Duskrosy/astroshel-lcd/releases/latest) page and run it. It's a simple Next → Finish wizard that needs **no admin rights**, adds a Start Menu shortcut, and starts with Windows. Uninstall any time from **Settings → Apps** (or the Start Menu "Uninstall" shortcut).
-2. **Close `Smart Screen V28`** first (both apps can't share the LCD's COM port). To stop it relaunching, remove it from Task Manager → Startup.
+```
+winget install Duskrosy.AstroshelLeanDisplay
+```
+
+**Or the installer:**
+
+1. Download **`astroshel-lean-display-*-setup.exe`** from the [**Releases**](https://github.com/Duskrosy/astroshel-lcd/releases/latest) page and run it — a simple Next → Finish wizard, **no admin rights** needed. It adds a Start Menu shortcut and starts with Windows. Uninstall any time from **Settings → Apps** (or the Start Menu "Uninstall" shortcut).
+2. **Close `Smart Screen V28`** first (both apps can't share the LCD's COM port; remove it from Task Manager → Startup so it doesn't relaunch).
 3. Done — the app runs in the system tray. Double-click the tray icon to open it.
 
-**Portable (no installer):** download the `.zip` instead, unzip anywhere, and run **`astroshel-lcd.exe`** (keep `ffmpeg.exe` next to it — it's only used to import video and otherwise never runs).
+The app **checks for updates** on its own and can download + run the new installer in one click (⚙ Settings shows when one's available).
 
 ## "Windows protected your PC" / antivirus warnings
 
@@ -72,7 +78,7 @@ Astroshel Lean Display is a new, open-source app that isn't code-signed yet, so 
 **Verify your download (recommended).** Every release includes a `SHA256SUMS.txt`. Check that your file matches:
 
 ```
-certutil -hashfile astroshel-lean-display-v0.3.0-setup.exe SHA256
+certutil -hashfile astroshel-lean-display-v0.4.0-setup.exe SHA256
 ```
 
 Compare the printed hash to the one in `SHA256SUMS.txt` on the [release page](https://github.com/Duskrosy/astroshel-lcd/releases/latest). If they match, the download is authentic.

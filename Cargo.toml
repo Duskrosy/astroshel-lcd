@@ -1,6 +1,6 @@
 [package]
 name = "astroshel-lcd"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 description = "Lean native display driver for the Jungle Leopard Astroshel AIO LCD"
 
@@ -24,6 +24,8 @@ egui = "0.29"           # must match eframe's egui version exactly
 rfd = "0.15"
 resvg = { version = "0.47.0", default-features = false }
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Media"] }
+minreq = { version = "2", features = ["https"] }   # tiny HTTPS client for the GitHub-release update check
+serde_json = "1"
 
 [profile.release]
 opt-level = "z"

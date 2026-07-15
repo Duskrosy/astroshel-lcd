@@ -7,6 +7,7 @@ use crate::encode;
 use crate::media;
 use crate::render;
 use crate::sensors;
+use crate::update;
 use crate::video;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -235,6 +236,15 @@ pub struct App {
     // to decide whether the "Re-import" button should be enabled (`None` when
     // there's no cached video selected, matching `current_video_lcdv`).
     video_import_settings: Option<(String, f32, [f32; 2], u32)>,
+    // Polish round: the cache entry id being replaced by an in-flight
+    // "Re-import" (set right before `spawn_video_import` is called from the
+    // Re-import button; `None` for a fresh "Add Media..." video pick, which
+    // goes through a different call site and never sets this). The video
+    // import completion handler in `update` takes this once the new cache
+    // entry is written and deletes the old one (unless pinned by a saved
+    // Profile) so re-importing doesn't leave an orphaned unpinned entry
+    // behind until it eventually ages out via `evict_unpinned`.
+    reimport_old_id: Option<String>,
     // Task 4a: in-process decode/playback state for a selected cached video's
     // preview (see `VideoPreview`). `None` whenever the current media isn't a
     // cached video, or Media mode isn't active (see `preview_rgba`'s clearing at
@@ -269,6 +279,24 @@ pub struct App {
     // Task 4b: the name typed into the "Save current as…" field, cleared once
     // the profile is saved.
     new_profile_name: String,
+    // Auto-update: shared with `update::spawn_check`'s background thread (see
+    // main.rs), which writes `Some(info)` here once it finds a release newer than
+    // `env!("CARGO_PKG_VERSION")` with a setup.exe asset. `update()` reads a clone of
+    // the current value every frame to decide whether to show the "Update available"
+    // banner -- never locked across a UI closure.
+    update: std::sync::Arc<std::sync::Mutex<Option<update::UpdateInfo>>>,
+    // True from the moment "Update now" is clicked until either the download fails
+    // (cleared, with a status message) or the installer is launched and the process is
+    // about to exit (left true so the button/banner can't be clicked again mid-exit).
+    updating: bool,
+    // Set by `start_update` when the background download/launch worker is spawned;
+    // `update()` polls it each frame and clears it once a result lands. `None` means
+    // no download is in flight.
+    update_download: Option<std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>>,
+    // Set once `download_and_run` has successfully launched the installer: the wall-clock
+    // instant at which `update()` should call `std::process::exit(0)`, giving the
+    // installer a brief head start so it can taskkill/replace files cleanly.
+    exit_at: Option<std::time::Instant>,
 }
 
 /// All `WidgetKind` variants, in the order offered by the "Add widget" picker.
@@ -287,7 +315,7 @@ const ALL_WIDGET_KINDS: [dashboard::WidgetKind; 7] = [
 ];
 
 /// The four sensor-driven widget kinds that carry a min/max range and a choice of
-/// Gauge/Ring/Bar/Number/Sparkline visualization. Clock/Date/Text are not "metric"
+/// Gauge/Ring/Bar/Number/Sparkline/Line visualization. Clock/Date/Text are not "metric"
 /// (no numeric range to scale against).
 /// Task 4b: total size in bytes of every file directly under `cache::cache_dir()`
 /// (the `.lcdv`/`.png` cache entries + `index.toml`) -- shown in the ⚙ Settings
@@ -324,6 +352,7 @@ impl App {
         has_tray: bool,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         media_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        update: std::sync::Arc<std::sync::Mutex<Option<update::UpdateInfo>>>,
     ) -> Self {
         // Renderer init only fails if the embedded font asset fails to parse, which
         // would be a build-time asset defect, not a runtime condition -- so treat it
@@ -379,6 +408,7 @@ impl App {
             current_video_lcdv: None,
             current_video_src: None,
             video_import_settings: None,
+            reimport_old_id: None,
             video_preview: None,
             current_media_id: None,
             recent_thumbs: std::collections::HashMap::new(),
@@ -386,7 +416,31 @@ impl App {
             loading_existing_id: None,
             show_settings: false,
             new_profile_name: String::new(),
+            update,
+            updating: false,
+            update_download: None,
+            exit_at: None,
         }
+    }
+
+    /// Spawns a background thread that downloads `info.installer_url` and launches it
+    /// (via `update::download_and_run`), writing the outcome into a fresh
+    /// `update_download` slot for `update()` to poll -- never blocks the calling (UI)
+    /// thread. A no-op (besides logging nothing) if a download is already in flight,
+    /// mirroring the `self.loading.is_some()` guards used elsewhere in this file.
+    fn start_update(&mut self, info: update::UpdateInfo) {
+        if self.updating {
+            return;
+        }
+        self.updating = true;
+        let result_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.update_download = Some(result_slot.clone());
+        std::thread::spawn(move || {
+            let outcome = update::download_and_run(&info).map_err(|e| format!("{e:#}"));
+            if let Ok(mut guard) = result_slot.lock() {
+                *guard = Some(outcome);
+            }
+        });
     }
 
     /// Task 4a: (re)loads the in-process preview decoder for the cached video at
@@ -733,14 +787,31 @@ impl App {
         self.set_status("Profile loaded", 3);
     }
 
-    /// Task 4b: removes `cfg.profiles[i]` and persists the config. Does not
-    /// touch the pin state of any media it referenced -- another profile (or
-    /// a future save) may still rely on it staying pinned, and safely
-    /// unpinning would require checking every other profile too; left as a
-    /// nice-to-have per the design spec.
+    /// Task 4b (revised): removes `cfg.profiles[i]` and persists the config.
+    /// If the removed profile referenced cached media (`media_id: Some(id)`)
+    /// and no other remaining profile still references that same `id`,
+    /// unpins it (`recent.set_pinned(id, false)`) so it's no longer exempt
+    /// from `evict_unpinned`/Clear Cache -- it can eventually be cleaned up
+    /// like any other unpinned entry. If another profile still references it,
+    /// it's left pinned.
     fn delete_profile(&mut self, i: usize) {
         if i < self.cfg.profiles.len() {
+            let removed_media_id = self.cfg.profiles[i].media_id.clone();
             self.cfg.profiles.remove(i);
+
+            if let Some(id) = removed_media_id {
+                let still_referenced = self
+                    .cfg
+                    .profiles
+                    .iter()
+                    .any(|p| p.media_id.as_deref() == Some(id.as_str()));
+                if !still_referenced {
+                    self.recent.set_pinned(&id, false);
+                    let _ = self.recent.save();
+                    self.refresh_recent();
+                }
+            }
+
             match config::save(&self.cfg_path, &self.cfg) {
                 Ok(_) => self.set_status("Profile deleted", 3),
                 Err(e) => self.set_status(format!("Save failed: {e}"), 6),
@@ -806,6 +877,22 @@ impl App {
         // cached video still selected.
         if !want_media && self.video_preview.is_some() {
             self.video_preview = None;
+        }
+
+        // Idle-RAM: also drop the decoded GIF preview cache while not in Media
+        // mode -- mirrors the `video_preview` drop above. `gif_compose_key` is
+        // cleared too so returning to Media mode with the same GIF still
+        // selected recomposes it fresh (the same key-mismatch path the
+        // non-animated-media branch below already relies on) instead of
+        // treating the stale key as current and returning nothing. Does NOT
+        // touch `media_obj` (the decoded source frames): unlike `gif_composed`
+        // (which cheaply regenerates here from `media_obj` whenever the key is
+        // stale), nothing in `preview_rgba` reloads `media_obj` from disk, so
+        // dropping it would leave the preview blank on returning to Media mode
+        // -- deferred rather than risk that regression.
+        if !want_media && self.gif_composed.is_some() {
+            self.gif_composed = None;
+            self.gif_compose_key = None;
         }
 
         if want_media {
@@ -1052,6 +1139,35 @@ impl eframe::App for App {
         }
         self.was_busy = busy;
 
+        // Auto-update: poll the in-flight download/launch worker (if any) spawned by
+        // `start_update`. On success, arm `exit_at` a short moment in the future rather
+        // than exiting immediately -- the installer's own process just started and needs
+        // a beat before it taskkills us; exiting instantly could race it. On failure,
+        // surface it via the normal transient status label and let the user retry.
+        if let Some(slot) = self.update_download.clone() {
+            let outcome = slot.lock().ok().and_then(|mut g| g.take());
+            if let Some(outcome) = outcome {
+                self.update_download = None;
+                match outcome {
+                    Ok(()) => {
+                        self.exit_at =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(800));
+                    }
+                    Err(e) => {
+                        self.updating = false;
+                        self.set_status(format!("Update failed: {e}"), 6);
+                    }
+                }
+            }
+        }
+        if let Some(t) = self.exit_at {
+            let now = std::time::Instant::now();
+            if now >= t {
+                std::process::exit(0);
+            }
+            ctx.request_repaint_after(t.saturating_duration_since(now));
+        }
+
         // Tray menu events (Open, Quit) and tray-icon events (click, double-click) are
         // handled on a dedicated thread (`spawn_tray_thread`, spawned in `main`'s
         // `app_creator`) that drives `ctx` directly via `send_viewport_cmd` +
@@ -1225,6 +1341,24 @@ impl eframe::App for App {
                                 created,
                                 pinned: false,
                             });
+
+                            // Re-import orphan cleanup: if this import is replacing the
+                            // previously-selected cached video (`reimport_old_id`, set by
+                            // the "Re-import" button), drop that old entry's `.lcdv` +
+                            // thumb + index entry now instead of leaving it as an orphaned
+                            // unpinned entry until `evict_unpinned` eventually catches it --
+                            // unless it's pinned (still referenced by a saved Profile), in
+                            // which case it must survive.
+                            if let Some(old_id) = self.reimport_old_id.take() {
+                                if old_id != id {
+                                    let old_pinned =
+                                        idx.get(&old_id).map(|e| e.pinned).unwrap_or(false);
+                                    if !old_pinned {
+                                        idx.remove(&old_id);
+                                    }
+                                }
+                            }
+
                             idx.evict_unpinned(10);
                             let _ = idx.save();
                             self.refresh_recent();
@@ -1248,6 +1382,11 @@ impl eframe::App for App {
                         }
                         Err(e) => {
                             self.set_status(format!("Video import failed: {e}"), 6);
+                            // The re-import didn't actually complete, so the old entry it
+                            // would have replaced is still the current selection -- don't
+                            // let a stale `reimport_old_id` leak into a later, unrelated
+                            // import's cleanup.
+                            self.reimport_old_id = None;
                         }
                     }
                     self.loading = None;
@@ -1256,6 +1395,7 @@ impl eframe::App for App {
                     self.set_status(format!("Video import failed: {e}"), 6);
                     self.loading = None;
                     self.loading_path = None;
+                    self.reimport_old_id = None;
                 }
                 (None, None) => {
                     load_progress_ui = Some((done, total, stage));
@@ -1450,8 +1590,42 @@ impl eframe::App for App {
                 }
             }
         });
+        // Auto-update banner: a clone of whatever `update::spawn_check`'s background
+        // thread last found, read once per frame here (rather than locking the mutex
+        // from inside the CentralPanel closure below) to keep the lock scope tiny.
+        let update_info = self.update.lock().ok().and_then(|g| g.clone());
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Astroshel Lean Display");
+
+            // Notify + one-click download & run: shown at the very top so it's the
+            // first thing seen on open whenever a newer release is available.
+            if let Some(info) = &update_info {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0, 224, 255),
+                        format!("Update available (v{})", info.version),
+                    );
+                    let can_click = !self.updating;
+                    if ui
+                        .add_enabled(can_click, egui::Button::new("Update now"))
+                        .clicked()
+                    {
+                        self.start_update(info.clone());
+                    }
+                    ui.hyperlink_to("What's new", &info.notes_url);
+                    if self.updating {
+                        ui.add(egui::Spinner::new());
+                        ui.label(if self.exit_at.is_some() {
+                            "Installer launched — closing…"
+                        } else {
+                            "Downloading update…"
+                        });
+                    }
+                });
+                ui.separator();
+            }
+
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.cfg.mode, "dashboard".to_string(), "Dashboard");
                 ui.selectable_value(&mut self.cfg.mode, "media".to_string(), "Media");
@@ -1546,6 +1720,9 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         let can_reimport = dirty && self.loading.is_none();
                         if ui.add_enabled(can_reimport, egui::Button::new("Re-import")).clicked() {
+                            // Remember the entry being superseded so the completion
+                            // handler can clean up its now-orphaned cache files.
+                            self.reimport_old_id = self.current_media_id.clone();
                             self.spawn_video_import(PathBuf::from(src));
                         }
                         if dirty {
@@ -1789,7 +1966,7 @@ impl eframe::App for App {
                                 ui.label("Viz:");
                                 let current = self.dashboard.widgets[i].viz;
                                 egui::ComboBox::from_id_salt("widget_viz")
-                                    .selected_text(current.as_str())
+                                    .selected_text(current.display_label())
                                     .show_ui(ui, |ui| {
                                         let options: &[dashboard::Viz] = if metric {
                                             &[
@@ -1798,12 +1975,13 @@ impl eframe::App for App {
                                                 dashboard::Viz::Bar,
                                                 dashboard::Viz::Number,
                                                 dashboard::Viz::Sparkline,
+                                                dashboard::Viz::Line,
                                             ]
                                         } else {
                                             &[dashboard::Viz::Number, dashboard::Viz::Analog]
                                         };
                                         for viz in options {
-                                            if ui.selectable_label(current == *viz, viz.as_str()).clicked() {
+                                            if ui.selectable_label(current == *viz, viz.display_label()).clicked() {
                                                 self.dashboard.widgets[i].viz = *viz;
                                             }
                                         }
@@ -2068,6 +2246,23 @@ impl eframe::App for App {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
+                if ui
+                    .checkbox(&mut self.cfg.start_at_logon, "Start with Windows")
+                    .changed()
+                {
+                    crate::set_logon(self.cfg.start_at_logon);
+                    let _ = config::save(&self.cfg_path, &self.cfg);
+                    self.set_status(
+                        if self.cfg.start_at_logon {
+                            "Will start with Windows"
+                        } else {
+                            "Won't start with Windows"
+                        },
+                        3,
+                    );
+                }
+                ui.weak("Astroshel Lean Display starts minimized to the system tray.");
+                ui.separator();
                 if ui.button("Clear Cache").clicked() {
                     self.recent.clear_unpinned();
                     let _ = self.recent.save();

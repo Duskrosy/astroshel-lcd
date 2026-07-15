@@ -68,6 +68,10 @@ pub enum Viz {
     /// Analog clock face (hour/minute/second hands). Only meaningful on a
     /// `Clock` widget; on other kinds the renderer falls back to `Number`.
     Analog,
+    /// A fuller "history line-graph" than `Sparkline`: a labeled polyline
+    /// with a filled area beneath it and a current-value readout, over the
+    /// widget's `History` series. Display label: "Line graph".
+    Line,
 }
 
 impl Viz {
@@ -81,6 +85,7 @@ impl Viz {
             "number" => Self::Number,
             "sparkline" => Self::Sparkline,
             "analog" => Self::Analog,
+            "line" | "linegraph" => Self::Line,
             _ => Self::Number,
         }
     }
@@ -93,6 +98,20 @@ impl Viz {
             Self::Number => "number",
             Self::Sparkline => "sparkline",
             Self::Analog => "analog",
+            Self::Line => "line",
+        }
+    }
+
+    /// Human-friendly label for pickers (e.g. the GUI's Viz ComboBox).
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            Self::Gauge => "Gauge",
+            Self::Ring => "Ring",
+            Self::Bar => "Bar",
+            Self::Number => "Number",
+            Self::Sparkline => "Sparkline",
+            Self::Analog => "Analog",
+            Self::Line => "Line graph",
         }
     }
 }
@@ -386,6 +405,13 @@ mod tests {
     fn analog_viz_roundtrip() {
         assert_eq!(Viz::from_str("analog"), Viz::Analog);
         assert_eq!(Viz::Analog.as_str(), "analog");
+    }
+    #[test]
+    fn line_viz_roundtrip() {
+        assert_eq!(Viz::from_str("line"), Viz::Line);
+        assert_eq!(Viz::from_str("Line Graph"), Viz::Line);
+        assert_eq!(Viz::Line.as_str(), "line");
+        assert_eq!(Viz::Line.display_label(), "Line graph");
     }
     #[test]
     fn all_template_widgets_within_canvas() {

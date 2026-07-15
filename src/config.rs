@@ -87,6 +87,13 @@ pub struct Config {
     pub show_bitrate_warning: bool,
     #[serde(default)]
     pub profiles: Vec<Profile>,
+    /// Whether the first-run tray nudge (showing the window instead of starting
+    /// hidden in the tray) has already fired. `false` on a brand-new config so a
+    /// new user notices the app launched; `main` flips this to `true` and
+    /// persists it immediately on the first run so every later launch starts
+    /// hidden as normal.
+    #[serde(default)]
+    pub shown_intro: bool,
 }
 
 fn default_twelve_hour() -> bool {
@@ -114,6 +121,7 @@ impl Default for Config {
             dashboard: dashboard::Dashboard::default(),
             show_bitrate_warning: default_true(),
             profiles: Vec::new(),
+            shown_intro: false,
         }
     }
 }
@@ -311,6 +319,27 @@ mod tests {
         assert_eq!(c.profiles.len(), 1);
         assert_eq!(c.profiles[0].bitrate_kbps, 8000);
         assert_eq!(c.profiles[0].brightness, 100);
+    }
+
+    #[test]
+    fn shown_intro_defaults_false_and_roundtrips() {
+        let c = Config::default();
+        assert!(!c.shown_intro, "a brand-new config must not have shown the intro yet");
+
+        let dir = std::env::temp_dir().join("astroshel_cfg_shown_intro");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut c2 = Config::default();
+        c2.shown_intro = true;
+        save(&path, &c2).unwrap();
+        let loaded = load(&path);
+        assert!(loaded.shown_intro, "shown_intro=true must survive a save/load round-trip");
+
+        // Pre-existing config files (written before `shown_intro` existed) must
+        // still parse, defaulting to false rather than failing.
+        let toml_str = "brightness = 80\nupdate_ms = 1000\nstart_at_logon = true\n";
+        let c3: Config = toml::from_str(toml_str).expect("should parse without shown_intro field");
+        assert!(!c3.shown_intro);
     }
 
     #[test]

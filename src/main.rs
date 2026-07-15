@@ -14,18 +14,19 @@ mod pipeline;
 mod proto;
 mod render;
 mod sensors;
+mod update;
 mod video;
 mod winwnd;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn config_path() -> std::path::PathBuf {
     let dir = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
     std::path::Path::new(&dir).join("astroshel-lcd").join("config.toml")
 }
 
-fn set_logon(enable: bool) {
+pub fn set_logon(enable: bool) {
     // HKCU\Software\Microsoft\Windows\CurrentVersion\Run
     let exe = std::env::current_exe().ok();
     let cmd = if enable { exe } else { None };
@@ -88,8 +89,23 @@ fn main() -> eframe::Result<()> {
     }
 
     let cfg_path = config_path();
-    let cfg = config::load(&cfg_path);
+    let mut cfg = config::load(&cfg_path);
     set_logon(cfg.start_at_logon);
+
+    // First-run tray nudge: the app otherwise starts hidden in the tray
+    // (`.with_visible(false)` below), which a brand-new user could easily miss
+    // entirely. On the very first run (a fresh config, `shown_intro` still
+    // false) show the window instead; flip and persist `shown_intro` right
+    // away so every later launch reverts to hidden-in-tray. Done here at
+    // startup -- not in `gui::App::update` -- since `update()` never runs while
+    // the window is hidden with a tray present.
+    let first_run = !cfg.shown_intro;
+    if first_run {
+        cfg.shown_intro = true;
+        if let Err(e) = config::save(&cfg_path, &cfg) {
+            log::warn!("failed to persist shown_intro after first run: {e:#}");
+        }
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel::<command::Command>();
@@ -97,6 +113,11 @@ fn main() -> eframe::Result<()> {
     // media (GIF pre-encode or a static image), so the GUI can show an "Applying..."
     // indicator instead of appearing to hang.
     let media_busy = Arc::new(AtomicBool::new(false));
+
+    // Auto-update: checked on startup and once/day by a background thread; the GUI
+    // polls this slot each frame to show an "Update available" banner. See update.rs.
+    let update_slot = Arc::new(Mutex::new(None));
+    update::spawn_check(update_slot.clone());
 
     // Worker: the pipeline (owns COM3).
     let worker_cfg = cfg.clone();
@@ -114,7 +135,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([600.0, 460.0])
         .with_min_inner_size([560.0, 440.0])
-        .with_visible(false); // start hidden (tray-first)
+        .with_visible(first_run); // hidden (tray-first), except visible once on the very first run
     // Brand icon for the window/taskbar. Rendered at 256px for a crisp Alt-Tab /
     // taskbar thumbnail; falls back to eframe's default (no icon) if rasterizing
     // the SVG asset fails for any reason.
@@ -146,7 +167,7 @@ fn main() -> eframe::Result<()> {
                 // work even while eframe stops calling `update()` on a hidden window.
                 gui::spawn_tray_thread(cc.egui_ctx.clone(), tray_ids, stop_gui.clone());
             }
-            Ok(Box::new(gui::App::new(cfg, cfg_path, tx, tray, has_tray, stop_gui, media_busy)))
+            Ok(Box::new(gui::App::new(cfg, cfg_path, tx, tray, has_tray, stop_gui, media_busy, update_slot)))
         }),
     );
 

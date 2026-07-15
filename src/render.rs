@@ -104,6 +104,13 @@ fn tsk_color(rgb: dashboard::Color) -> Color {
     Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255)
 }
 
+/// Same as `tsk_color` but with an explicit alpha -- used by `draw_line`'s
+/// filled area-under-curve, which wants the accent color at low opacity
+/// rather than the fully-opaque colors every other primitive here uses.
+fn tsk_color_alpha(rgb: dashboard::Color, alpha: u8) -> Color {
+    Color::from_rgba8(rgb[0], rgb[1], rgb[2], alpha)
+}
+
 /// Fill an axis-aligned rect. No-op (does not panic) for degenerate/negative sizes.
 fn fill_rect(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, rgb: dashboard::Color) {
     if !(w > 0.0) || !(h > 0.0) {
@@ -450,6 +457,41 @@ impl Renderer {
         }
     }
 
+    /// Left-aligned, top-anchored text draw -- the `Viz::Line` counterpart to
+    /// `draw_text_centered`'s center-anchored draw. `top_y` is the top of the
+    /// text's line box (not the baseline); text grows rightward from `x`
+    /// starting there. Same auto-fit-to-`max_w` behavior as
+    /// `draw_text_centered` (scales down, never up; pass a non-positive
+    /// `max_w` to skip fitting).
+    fn draw_text_left(&self, pixmap: &mut Pixmap, text: &str, x: f32, top_y: f32, px: f32, max_w: f32, rgb: dashboard::Color) {
+        if text.is_empty() || !(px > 0.0) {
+            return;
+        }
+        let mut px = px;
+        if max_w > 0.0 {
+            let raw_w = self.text_width(text, px);
+            if raw_w > max_w {
+                let scale = (max_w / raw_w).clamp(0.05, 1.0);
+                px = (px * scale).max(4.0);
+            }
+        }
+        let metrics = self.font.horizontal_line_metrics(px).unwrap_or(fontdue::LineMetrics {
+            ascent: px * 0.8,
+            descent: -px * 0.2,
+            line_gap: 0.0,
+            new_line_size: px,
+        });
+        let baseline_y = top_y + metrics.ascent;
+        let mut pen_x = x;
+        for ch in text.chars() {
+            let (m, bitmap) = self.font.rasterize(ch, px);
+            let gx = pen_x + m.xmin as f32;
+            let gy = baseline_y - m.ymin as f32 - m.height as f32;
+            blit_glyph_to(pixmap, &bitmap, m.width, m.height, gx, gy, rgb);
+            pen_x += m.advance_width;
+        }
+    }
+
     fn draw_widget(&self, pixmap: &mut Pixmap, theme: dashboard::Theme, w: &dashboard::Widget, snap: &Snapshot, hist: &History) {
         use dashboard::{Viz, WidgetKind};
 
@@ -489,6 +531,7 @@ impl Renderer {
             Viz::Bar => self.draw_bar(pixmap, w, theme, accent, value, &primary, caption.as_deref(), x, y, rw, rh, cx, cy),
             Viz::Number | Viz::Analog => self.draw_number(pixmap, w, theme, &primary, caption.as_deref(), rw, rh, cx, cy),
             Viz::Sparkline => self.draw_sparkline(pixmap, w, theme, accent, hist, &primary, x, y, rw, rh, cx),
+            Viz::Line => self.draw_line(pixmap, w, theme, accent, hist, &primary, caption.as_deref(), x, y, rw, rh),
         }
     }
 
@@ -689,6 +732,108 @@ impl Renderer {
             }
         }
         // Empty/single-sample history: nothing more to draw -- baseline + label suffice.
+    }
+
+    /// `Viz::Line`: a fuller "history line-graph" than `Sparkline` -- a
+    /// labeled chart rather than a compact glance-glyph. Shares the same
+    /// `History` series and `frac()` scaling as `Sparkline`, but additionally
+    /// draws a filled area beneath the polyline (accent at low alpha) and a
+    /// current-value readout (+ caption, space permitting) pinned to the
+    /// top-left corner instead of centered. Degenerate cases (< 2 samples,
+    /// tiny rect) degrade gracefully: the baseline + value label alone still
+    /// read as a chart.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_line(
+        &self,
+        pixmap: &mut Pixmap,
+        w: &dashboard::Widget,
+        theme: dashboard::Theme,
+        accent: dashboard::Color,
+        hist: &History,
+        primary: &str,
+        caption: Option<&str>,
+        x: f32,
+        y: f32,
+        rw: f32,
+        rh: f32,
+    ) {
+        let pad = (rh * 0.06).clamp(3.0, 10.0);
+        let max_w = (rw - pad * 2.0).max(4.0);
+
+        // Current-value readout, top-left corner (what makes this read as a
+        // labeled chart rather than a bare sparkline).
+        let value_px = (rh * 0.16 * w.font_scale).clamp(7.0, 26.0);
+        self.draw_text_left(pixmap, primary, x + pad, y + pad, value_px, max_w, theme.text);
+
+        // Caption underneath the value, only when there's clearly room for it
+        // (small widgets keep just the value + chart).
+        let mut header_h = pad + value_px * 1.15;
+        if let (true, Some(cap)) = (w.label, caption) {
+            if rh >= 70.0 {
+                let cap_px = (value_px * 0.55).clamp(6.0, 16.0);
+                self.draw_text_left(pixmap, cap, x + pad, y + header_h, cap_px, max_w, theme.muted);
+                header_h += cap_px * 1.2;
+            }
+        }
+
+        // Faint baseline near the bottom of the plot area.
+        let baseline_y = y + rh - pad * 1.2;
+        fill_rect(pixmap, x, baseline_y, rw, 1.0, theme.track);
+
+        let plot_top = (y + header_h + pad * 0.4).min(baseline_y - 4.0);
+        let plot_h = (baseline_y - plot_top).max(1.0);
+
+        let series = hist.series(w.kind);
+        if series.len() >= 2 {
+            let n = series.len();
+            let step = rw / (n as f32 - 1.0).max(1.0);
+            let points: Vec<(f32, f32)> = series
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let f = frac(*v, w.min, w.max);
+                    let px = x + step * i as f32;
+                    let py = plot_top + plot_h * (1.0 - f);
+                    (px, py)
+                })
+                .collect();
+
+            // Filled area beneath the line: accent color at low alpha.
+            let mut area = PathBuilder::new();
+            area.move_to(points[0].0, baseline_y);
+            for (px, py) in &points {
+                area.line_to(*px, *py);
+            }
+            area.line_to(points[n - 1].0, baseline_y);
+            area.close();
+            if let Some(path) = area.finish() {
+                let mut paint = Paint::default();
+                paint.set_color(tsk_color_alpha(accent, 46));
+                paint.anti_alias = true;
+                pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            }
+
+            // Connected polyline through the points, 2px, accent color.
+            let mut line = PathBuilder::new();
+            for (i, (px, py)) in points.iter().enumerate() {
+                if i == 0 {
+                    line.move_to(*px, *py);
+                } else {
+                    line.line_to(*px, *py);
+                }
+            }
+            if let Some(path) = line.finish() {
+                let mut paint = Paint::default();
+                paint.set_color(tsk_color(accent));
+                paint.anti_alias = true;
+                let mut stroke = Stroke::default();
+                stroke.width = 2.0;
+                stroke.line_cap = tiny_skia::LineCap::Round;
+                stroke.line_join = tiny_skia::LineJoin::Round;
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        // Empty/single-sample history: baseline + value label (+ caption) suffice.
     }
 
     /// Analog clock face: a circular outline (theme.track), 12 tick marks, and
@@ -989,6 +1134,38 @@ mod engine_tests {
     }
 
     #[test]
+    fn render_dashboard_line_viz_with_history_and_empty_no_panic() {
+        let renderer = new().expect("renderer init");
+        let snap = test_snapshot();
+        let mut hist = History::new();
+        for i in 0..40 {
+            hist.push(WidgetKind::GpuUsage, (i as f32 * 2.5).min(100.0));
+        }
+
+        // Populated history, plenty of room for value + caption + chart.
+        let mut line_big = Widget::new(WidgetKind::GpuUsage);
+        line_big.viz = Viz::Line;
+        line_big.rect = Rect::new(0, 0, 160, 160);
+
+        // Empty history (CpuUsage never pushed) -- exercises the < 2 samples path.
+        let mut line_empty = Widget::new(WidgetKind::CpuUsage);
+        line_empty.viz = Viz::Line;
+        line_empty.rect = Rect::new(160, 0, 160, 160);
+
+        // Tiny rect -- exercises the "no room for caption" / clamped-plot path.
+        let mut line_tiny = Widget::new(WidgetKind::RamUsage);
+        line_tiny.viz = Viz::Line;
+        line_tiny.rect = Rect::new(0, 160, 40, 30);
+
+        let dash = Dashboard {
+            theme: Theme::default(),
+            widgets: vec![line_big, line_empty, line_tiny],
+        };
+        let out = renderer.render_dashboard(&dash, &snap, &hist);
+        assert_eq!(out.len(), (CANVAS * CANVAS * 4) as usize);
+    }
+
+    #[test]
     fn render_dashboard_widget_at_canvas_edge_no_panic() {
         let renderer = new().expect("renderer init");
         let snap = test_snapshot();
@@ -1058,6 +1235,18 @@ mod engine_tests {
         save(
             &stats_grid,
             r"C:\Users\Gavril\AppData\Local\Temp\claude\C--Users-Gavril-Documents-Sandbox\ebda49d4-a528-451a-97d5-e28ba1191385\scratchpad\dash_statsgrid.png",
+        );
+
+        // Line-graph viz visual check: same four metrics as Stats Grid, but
+        // each cell set to Viz::Line instead of the template default, so the
+        // area-fill + polyline + top-left value label can be eyeballed.
+        let mut line_grid = stats_grid.clone();
+        for w in &mut line_grid.widgets {
+            w.viz = Viz::Line;
+        }
+        save(
+            &line_grid,
+            r"C:\Users\Gavril\AppData\Local\Temp\claude\C--Users-Gavril-Documents-Sandbox\ebda49d4-a528-451a-97d5-e28ba1191385\scratchpad\dash_linegrid.png",
         );
     }
 }

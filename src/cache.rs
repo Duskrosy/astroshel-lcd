@@ -261,6 +261,19 @@ impl CacheIndex {
         });
     }
 
+    /// Delete cache entry `id`'s files (`path` + `thumb`, best-effort -- I/O
+    /// errors are ignored) and drop it from `entries`, regardless of pinned
+    /// state. A no-op if `id` isn't present. Callers that must respect pinning
+    /// (e.g. re-import orphan cleanup) should check `get(id).pinned` first.
+    #[allow(dead_code)]
+    pub fn remove(&mut self, id: &str) {
+        if let Some(e) = self.entries.iter().find(|e| e.id == id) {
+            let _ = std::fs::remove_file(&e.path);
+            let _ = std::fs::remove_file(&e.thumb);
+        }
+        self.entries.retain(|e| e.id != id);
+    }
+
     /// Delete every unpinned entry's files and drop them from `entries`.
     #[allow(dead_code)]
     pub fn clear_unpinned(&mut self) {
@@ -512,6 +525,36 @@ mod tests {
         }
         idx.evict_unpinned(0);
         assert_eq!(idx.entries.len(), 5, "no pinned entries should ever be removed");
+    }
+
+    #[test]
+    fn remove_deletes_files_and_entry() {
+        let dir = temp_subdir("remove");
+        let mut idx = CacheIndex::default();
+        idx.add(make_entry("a", 1, false, &dir));
+        idx.add(make_entry("b", 2, true, &dir));
+
+        idx.remove("a");
+
+        assert_eq!(idx.entries.len(), 1);
+        assert!(idx.get("a").is_none());
+        assert!(idx.get("b").is_some());
+        assert!(!dir.join("a.lcdv").exists());
+        assert!(!dir.join("a_thumb.png").exists());
+        assert!(dir.join("b.lcdv").exists());
+    }
+
+    #[test]
+    fn remove_missing_id_is_a_noop() {
+        let dir = temp_subdir("remove_missing");
+        let mut idx = CacheIndex::default();
+        idx.add(make_entry("a", 1, false, &dir));
+
+        idx.remove("does-not-exist");
+
+        assert_eq!(idx.entries.len(), 1);
+        assert!(idx.get("a").is_some());
+        assert!(dir.join("a.lcdv").exists());
     }
 
     #[test]
